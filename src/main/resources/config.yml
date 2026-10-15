@@ -1,0 +1,25 @@
+# PollinationsCraft — every AI call is billed to this key, with your own Pollen.
+# Create one at https://enter.pollinations.ai/keys and keep it private.
+api-key: ""
+
+# Models from the live lists at https://gen.pollinations.ai/text/models and
+# https://gen.pollinations.ai/image/models. Any name from those pages works.
+text-model: "openai/gpt-5.4-nano"
+image-model: "flux"
+
+# How much of a conversation an NPC remembers per player. The tail of the
+# conversation is kept in memory.yml, so it survives restarts.
+memory:
+  turns: 12
+  characters: 2000
+
+# Pictures are generated at this size, then fitted into the 128x128 map.
+image:
+  width: 512
+  height: 512
+
+# 0 means every player may generate without a limit.
+daily-image-limit: 40
+
+# Show the Pollen cost after each answer, so spending stays visible.
+announce-costs: true

@@ -1,0 +1,21 @@
+name: PollinationsCraft
+version: ${version}
+main: ai.pollinations.craft.PollinationsPlugin
+api-version: "1.21"
+author: rekty
+description: AI villagers and prompt-to-map images powered by Pollinations, paid with your own Pollen.
+website: https://github.com/rekty/pollinations-craft
+commands:
+  polli:
+    description: Talk to Pollinations NPCs, generate images on maps, browse models.
+    usage: /polli <ask|npc|say|image|models|reload> ...
+permissions:
+  pollinations.chat:
+    description: Ask the model, talk to NPCs, list models.
+    default: true
+  pollinations.image:
+    description: Generate images on maps.
+    default: true
+  pollinations.admin:
+    description: Create and remove NPCs, reload the config.
+    default: op

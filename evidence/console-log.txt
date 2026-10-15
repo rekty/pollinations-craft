@@ -1,0 +1,25 @@
+== Paper 1.21.4-232, Java 21, plugin from build/libs, driven from the server console ==
+
+[12:58:30 INFO]: [PluginRemapper] Done remapping plugin 'plugins\pollinations-craft-1.0.0.jar' in 196ms.
+ - PollinationsCraft (1.0.0)
+[12:58:47 INFO]: [PollinationsCraft] Enabling PollinationsCraft v1.0.0
+[12:58:47 INFO]: [PollinationsCraft] pollinations-craft enabled, 0 saved map(s) restored
+[13:01:15 INFO]: 226 text models, e.g.:
+[13:01:15 INFO]: All of them: https://gen.pollinations.ai/text/models
+[13:01:33 INFO]: Bjorn the villager now stands at 2, -60, 0 (entity 21)
+[13:01:43 INFO]: Bjorn is thinking…
+[13:01:50 INFO]: Bjorn: Hmph, console, today I'm hammering out iron tools that don't bend when a fool swings too hard. Don't tell anyone, but I keep a little verse in my ledger about iron: it endures, and so must the will. Now mind your hands, and mind your temper.
+[13:01:50 INFO]: ~ 0.00007665 Pollen
+[13:02:28 INFO]: Bjorn is thinking…
+[13:02:37 INFO]: Bjorn: Iron sings in furnace heat, a steady, stubborn tone.
+[13:02:37 INFO]: ~ 0.00008614 Pollen
+[13:03:26 INFO]: Painted and saved; a copy is at plugins\PollinationsCraft\exports\picture-1792044206234.png, maps/ holds every map.
+[13:04:58 INFO]: NPCs: Bjorn
+[13:05:03 INFO]: [PollinationsCraft] Disabling PollinationsCraft v1.0.0
+
+== second boot: the same server, restarted ==
+
+[13:07:19 INFO]: [PollinationsCraft] pollinations-craft enabled, 1 saved map(s) restored
+[13:07:52 INFO]: Bjorn is thinking…
+[13:08:00 INFO]: Bjorn: Hmph, console, I remember you've been asking about my craft and my iron poems. I don't see faces long, but your words do clang like good steel.
+[13:08:35 INFO]: 88 image models, e.g.:
