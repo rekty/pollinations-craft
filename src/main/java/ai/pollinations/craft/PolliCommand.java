@@ -344,24 +344,28 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
     private void models(CommandSender sender, String[] args) {
         if (!perm(sender, "pollinations.chat")) return;
         String kind = args.length > 1 && args[1].equalsIgnoreCase("image") ? "image" : "text";
-        runAsync(() -> {
-            List<ModelInfo> models = plugin.catalog().models(kind);
-            runSync(() -> {
-                if (models.isEmpty()) {
-                    sender.sendMessage(Component.text(
-                            "The model list at gen.pollinations.ai is not reachable right now.",
-                            NamedTextColor.RED));
-                    return;
-                }
-                sender.sendMessage(Component.text(
-                        models.size() + " " + kind + " models, e.g.:", NamedTextColor.GOLD));
-                models.stream().limit(12).forEach(model -> sender.sendMessage(Component.text(
-                        model.name() + " \u2014 " + model.title(), NamedTextColor.GRAY)));
-                sender.sendMessage(Component.text(
-                        "All of them: https://gen.pollinations.ai/" + kind + "/models",
-                        NamedTextColor.DARK_GRAY));
-            });
-        });
+        List<ModelInfo> known = plugin.catalog().models(kind);
+        if (!known.isEmpty()) {
+            showModels(sender, kind, known);
+            return;
+        }
+        plugin.catalog().fetch(kind, models -> runSync(() -> showModels(sender, kind, models)));
+    }
+
+    private static void showModels(CommandSender sender, String kind, List<ModelInfo> models) {
+        if (models.isEmpty()) {
+            sender.sendMessage(Component.text(
+                    "The model list at gen.pollinations.ai is not reachable right now.",
+                    NamedTextColor.RED));
+            return;
+        }
+        sender.sendMessage(Component.text(
+                models.size() + " " + kind + " models, e.g.:", NamedTextColor.GOLD));
+        models.stream().limit(12).forEach(model -> sender.sendMessage(Component.text(
+                model.name() + " \u2014 " + model.title(), NamedTextColor.GRAY)));
+        sender.sendMessage(Component.text(
+                "All of them: https://gen.pollinations.ai/" + kind + "/models",
+                NamedTextColor.DARK_GRAY));
     }
 
     private void reload(CommandSender sender) {
