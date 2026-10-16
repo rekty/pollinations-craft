@@ -20,9 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.regex.Pattern;
 
@@ -72,20 +71,19 @@ public final class NpcRegistry {
     private final Map<String, Npc> byName = new LinkedHashMap<>();
     // npc id -> player id -> memory
     private final Map<String, Map<UUID, ConversationMemory>> memories = new LinkedHashMap<>();
-    // True when npcs.yml exists but cannot be read; the NPC villagers are then left alone.
+    // True when npcs.yml exists but cannot be read: no villager is removed and the file is not overwritten.
     private boolean broken;
-    // One writer thread: memory.yml is saved in order, and never on the game thread.
-    private final ExecutorService writer = Executors.newSingleThreadExecutor(task -> {
-        Thread thread = new Thread(task, "PollinationsCraft memory writer");
-        thread.setDaemon(true);
-        return thread;
-    });
+    // The plugin's one writer thread, so memory.yml is saved in order and never on the game thread.
+    private final Executor writer;
+    // The newest conversations not yet on disk; older pending saves are skipped.
+    private final AtomicReference<Map<String, List<String>>> pending = new AtomicReference<>();
 
-    public NpcRegistry(File dataFolder, int maxTurns, int maxChars) {
+    public NpcRegistry(File dataFolder, int maxTurns, int maxChars, Executor writer) {
         this.npcsFile = new File(dataFolder, "npcs.yml");
         this.memoryFile = new File(dataFolder, "memory.yml");
         this.maxTurns = maxTurns;
         this.maxChars = maxChars;
+        this.writer = writer;
     }
 
     public void load() {
@@ -129,6 +127,8 @@ public final class NpcRegistry {
     }
 
     public void save() {
+        saveMemoriesLater();
+        if (broken) return; // keep the unreadable npcs.yml for the owner to fix
         YamlConfiguration yaml = new YamlConfiguration();
         for (Npc npc : byName.values()) {
             String base = "npcs." + npc.id() + ".";
@@ -142,13 +142,22 @@ public final class NpcRegistry {
             yaml.set(base + "yaw", npc.place().yaw());
         }
         write(npcsFile, yaml.saveToString());
-        saveMemoriesLater();
     }
 
     private void loadMemories() {
         memories.clear();
         if (!memoryFile.exists()) return;
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(memoryFile);
+        YamlConfiguration yaml = new YamlConfiguration();
+        try {
+            yaml.load(memoryFile);
+        } catch (IOException | InvalidConfigurationException e) {
+            // Keep the unreadable file for the owner instead of overwriting it with the next answer.
+            File aside = new File(memoryFile.getParentFile(), "memory.yml.broken-" + System.currentTimeMillis());
+            boolean moved = memoryFile.renameTo(aside);
+            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot read memory.yml"
+                    + (moved ? "; moved it to " + aside.getName() + " and started empty" : ""), e);
+            return;
+        }
         ConfigurationSection npcs = yaml.getConfigurationSection("memory");
         if (npcs == null) return;
         for (String npcId : npcs.getKeys(false)) {
@@ -173,27 +182,11 @@ public final class NpcRegistry {
 
     /**
      * Writes memory.yml in the background, so a crash or a reload loses at
-     * most the answer in flight. Call it on the game thread after each answer.
+     * most the answer in flight. Call it on the game thread after each answer:
+     * it only copies the conversations; the writer turns them into YAML.
      */
     public void saveMemoriesLater() {
-        String text = memoriesYaml().saveToString();
-        writer.execute(() -> write(memoryFile, text));
-    }
-
-    /** Waits for the background writes; call before the files are read again. */
-    public void close() {
-        writer.shutdown();
-        try {
-            if (!writer.awaitTermination(10, TimeUnit.SECONDS)) {
-                Bukkit.getLogger().warning("pollinations-craft: memory.yml is still being written");
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private YamlConfiguration memoriesYaml() {
-        YamlConfiguration yaml = new YamlConfiguration();
+        Map<String, List<String>> snapshot = new LinkedHashMap<>();
         for (Map.Entry<String, Map<UUID, ConversationMemory>> npc : memories.entrySet()) {
             for (Map.Entry<UUID, ConversationMemory> player : npc.getValue().entrySet()) {
                 List<String> lines = new ArrayList<>();
@@ -201,10 +194,17 @@ public final class NpcRegistry {
                     lines.add(pair[0]);
                     lines.add(pair[1]);
                 }
-                yaml.set("memory." + npc.getKey() + "." + player.getKey(), lines);
+                snapshot.put(npc.getKey() + "." + player.getKey(), lines);
             }
         }
-        return yaml;
+        pending.set(snapshot);
+        writer.execute(() -> {
+            Map<String, List<String>> latest = pending.getAndSet(null);
+            if (latest == null) return; // an earlier task already wrote this one
+            YamlConfiguration yaml = new YamlConfiguration();
+            latest.forEach((path, lines) -> yaml.set("memory." + path, lines));
+            write(memoryFile, yaml.saveToString());
+        });
     }
 
     /**

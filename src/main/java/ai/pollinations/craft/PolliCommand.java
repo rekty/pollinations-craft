@@ -117,7 +117,7 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
     }
 
     private void createNpc(CommandSender sender, String[] args) {
-        if (!perm(sender, "pollinations.admin")) return;
+        if (!perm(sender, "pollinations.admin") || npcsUnreadable(sender)) return;
         if (args.length < 4) {
             sender.sendMessage(Component.text(
                     "Usage: /polli npc create <name> <persona>", NamedTextColor.RED));
@@ -153,7 +153,7 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
     }
 
     private void removeNpc(CommandSender sender, String[] args) {
-        if (!perm(sender, "pollinations.admin")) return;
+        if (!perm(sender, "pollinations.admin") || npcsUnreadable(sender)) return;
         if (args.length < 3) {
             sender.sendMessage(Component.text("Usage: /polli npc remove <name>", NamedTextColor.RED));
             return;
@@ -167,6 +167,14 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
         plugin.registry().remove(npc.name());
         plugin.registry().save();
         sender.sendMessage(Component.text(npc.name() + " is gone.", NamedTextColor.GREEN));
+    }
+
+    /** While npcs.yml cannot be read, NPCs are not changed, so the file is not overwritten. */
+    private boolean npcsUnreadable(CommandSender sender) {
+        if (!plugin.registry().broken()) return false;
+        sender.sendMessage(Component.text(
+                "npcs.yml could not be read. Fix it, then run /polli reload.", NamedTextColor.RED));
+        return true;
     }
 
     // ---------------------------------------------------------------- say

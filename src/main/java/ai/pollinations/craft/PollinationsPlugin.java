@@ -27,6 +27,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
 /**
@@ -47,6 +52,12 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
     private RateLimiter chatLimit;
     private RateLimiter imageLimit;
     private final Map<UUID, Session> sessions = new ConcurrentHashMap<>();
+    // One writer for the plugin's lifetime: memory.yml is saved in order, never on the game thread.
+    private final ExecutorService writer = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "PollinationsCraft memory writer");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final Map<UUID, Integer> imagesToday = new ConcurrentHashMap<>();
     private String budgetDay = day();
 
@@ -74,15 +85,31 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         reloadConfig();
         settings = CraftConfig.read(getConfig());
         client = new PollinationsClient();
-        if (registry != null) registry.close();
-        registry = new NpcRegistry(getDataFolder(), settings.memoryTurns(), settings.memoryChars());
-        registry.load();
+        if (registry == null || writesDone()) {
+            registry = new NpcRegistry(getDataFolder(), settings.memoryTurns(), settings.memoryChars(), writer);
+            registry.load();
+        } else {
+            getLogger().warning("memory.yml is still being written; NPCs and memory were not re-read.");
+        }
         gallery = new MapGallery(getDataFolder());
         catalog = new ModelCatalogCache(this, client, settings.apiKey());
         chatLimit = limiter(settings.chatsPerHour());
         imageLimit = limiter(settings.imagesPerHour());
         settleLoadedNpcs();
         checkModels();
+    }
+
+    /** Waits up to ten seconds for the saves already queued, so files are read after them. */
+    private boolean writesDone() {
+        try {
+            writer.submit(() -> {}).get(10, TimeUnit.SECONDS);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException | TimeoutException e) {
+            return false;
+        }
     }
 
     private RateLimiter limiter(int perHour) {
@@ -117,9 +144,14 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
     @Override
     public void onDisable() {
         sessions.clear();
-        if (registry != null) {
-            registry.save();
-            registry.close();
+        if (registry != null) registry.save();
+        writer.shutdown();
+        try {
+            if (!writer.awaitTermination(10, TimeUnit.SECONDS)) {
+                getLogger().warning("memory.yml was still being written at shutdown.");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -220,19 +252,32 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * One villager per NPC: a villager in this chunk goes when its NPC was
-     * removed or another copy of it is already loaded (older versions spawned
-     * one per restart), and an NPC whose place is here gets a villager when
-     * none is loaded. Nothing is touched while npcs.yml cannot be read.
+     * One villager per NPC: villagers of removed NPCs go, and when an NPC has
+     * more than one loaded copy (older versions spawned one per restart), the
+     * copy at the NPC's own place stays. An NPC whose place is here gets a
+     * villager when none is loaded. Nothing is touched while npcs.yml cannot
+     * be read.
      */
     private void settle(Chunk chunk) {
         if (registry.broken() || !chunk.isLoaded() || !chunk.isEntitiesLoaded()) return;
         for (Entity entity : chunk.getEntities()) {
             String id = npcId(entity);
             if (id == null) continue;
-            boolean another = findNpcs(id).stream()
-                    .anyMatch(other -> !other.getUniqueId().equals(entity.getUniqueId()));
-            if (registry.byId(id) == null || another) entity.remove();
+            NpcRegistry.Npc npc = registry.byId(id);
+            if (npc == null) {
+                entity.remove();
+                continue;
+            }
+            boolean home = npc.place().in(chunk);
+            for (Villager other : findNpcs(id)) {
+                if (other.getUniqueId().equals(entity.getUniqueId())) continue;
+                if (home && !npc.place().in(other.getChunk())) {
+                    other.remove();
+                } else {
+                    entity.remove();
+                    break;
+                }
+            }
         }
         for (NpcRegistry.Npc npc : registry.all()) {
             if (npc.place().in(chunk) && findNpc(npc.id()) == null) {
