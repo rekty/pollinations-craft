@@ -1,6 +1,7 @@
 package ai.pollinations.craft;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
@@ -9,11 +10,18 @@ import org.bukkit.entity.Villager;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.regex.Pattern;
 
@@ -44,6 +52,13 @@ public final class NpcRegistry {
             if (world == null) return null;
             return new Location(world, x, y, z, yaw, 0f);
         }
+
+        /** True when this place lies in that chunk. */
+        public boolean in(Chunk chunk) {
+            return chunk.getWorld().getName().equals(world)
+                    && ((int) Math.floor(x) >> 4) == chunk.getX()
+                    && ((int) Math.floor(z) >> 4) == chunk.getZ();
+        }
     }
 
     /** NPC names: what a player can type, and what the server allows. */
@@ -56,6 +71,12 @@ public final class NpcRegistry {
     private final Map<String, Npc> byName = new LinkedHashMap<>();
     // npc id -> player id -> memory
     private final Map<String, Map<UUID, ConversationMemory>> memories = new LinkedHashMap<>();
+    // One writer thread: memory.yml is saved in order, and never on the game thread.
+    private final ExecutorService writer = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "PollinationsCraft memory writer");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public NpcRegistry(File dataFolder, int maxTurns, int maxChars) {
         this.npcsFile = new File(dataFolder, "npcs.yml");
@@ -137,7 +158,30 @@ public final class NpcRegistry {
         }
     }
 
+    /**
+     * Writes memory.yml in the background, so a crash or a reload loses at
+     * most the answer in flight. Call it on the game thread after each answer.
+     */
+    public void saveMemoriesLater() {
+        String text = memoriesYaml().saveToString();
+        writer.execute(() -> write(memoryFile, text));
+    }
+
+    /** Waits for the background writes; call before the files are read again. */
+    public void close() {
+        writer.shutdown();
+        try {
+            writer.awaitTermination(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private void saveMemories() {
+        write(memoryFile, memoriesYaml().saveToString());
+    }
+
+    private YamlConfiguration memoriesYaml() {
         YamlConfiguration yaml = new YamlConfiguration();
         for (Map.Entry<String, Map<UUID, ConversationMemory>> npc : memories.entrySet()) {
             for (Map.Entry<UUID, ConversationMemory> player : npc.getValue().entrySet()) {
@@ -149,10 +193,19 @@ public final class NpcRegistry {
                 yaml.set("memory." + npc.getKey() + "." + player.getKey(), lines);
             }
         }
+        return yaml;
+    }
+
+    /** Write to a temporary file, then swap it in, so a crash never leaves half a file. */
+    private static void write(File file, String text) {
         try {
-            yaml.save(memoryFile);
+            Path temporary = file.toPath().resolveSibling(file.getName() + ".tmp");
+            Files.createDirectories(temporary.getParent());
+            Files.writeString(temporary, text, StandardCharsets.UTF_8);
+            Files.move(temporary, file.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
-            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot save memory.yml", e);
+            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot save " + file.getName(), e);
         }
     }
 
@@ -175,6 +228,14 @@ public final class NpcRegistry {
 
     public Npc get(String name) {
         return name == null ? null : byName.get(name.toLowerCase());
+    }
+
+    /** The NPC a villager's tag points at, or null for a removed one. */
+    public Npc byId(String id) {
+        for (Npc npc : byName.values()) {
+            if (npc.id().equals(id)) return npc;
+        }
+        return null;
     }
 
     public Npc add(String name, String persona, String model, Place place) {

@@ -3,7 +3,10 @@ package ai.pollinations.craft;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
+import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -13,15 +16,20 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.world.EntitiesLoadEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * PollinationsCraft: villagers with personas that chat, and pictures on maps,
@@ -38,6 +46,8 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
     private NpcRegistry registry;
     private MapGallery gallery;
     private ModelCatalogCache catalog;
+    private RateLimiter chatLimit;
+    private RateLimiter imageLimit;
     private final Map<UUID, Session> sessions = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> imagesToday = new ConcurrentHashMap<>();
     private String budgetDay = day();
@@ -56,7 +66,6 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
             command.setExecutor(handler);
             command.setTabCompleter(handler);
         }
-        Bukkit.getScheduler().runTaskLater(this, this::spawnAll, 1L);
         int restored = gallery.restore();
         getLogger().info("pollinations-craft enabled, " + restored + " saved map(s) restored");
         for (String problem : settings.problems()) getLogger().warning(problem);
@@ -67,16 +76,53 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         reloadConfig();
         settings = CraftConfig.read(getConfig());
         client = new PollinationsClient();
+        if (registry != null) registry.close();
         registry = new NpcRegistry(getDataFolder(), settings.memoryTurns(), settings.memoryChars());
         registry.load();
         gallery = new MapGallery(getDataFolder());
-        catalog = new ModelCatalogCache(client, settings.apiKey());
+        catalog = new ModelCatalogCache(this, client, settings.apiKey());
+        chatLimit = limiter(settings.chatsPerHour());
+        imageLimit = limiter(settings.imagesPerHour());
+        settleLoadedNpcs();
+        checkModels();
+    }
+
+    private RateLimiter limiter(int perHour) {
+        return new RateLimiter(settings.cooldownSeconds() * 1000L,
+                perHour == 0 ? Integer.MAX_VALUE : perHour, 3_600_000L);
+    }
+
+    /** Warns in the log when a configured model is missing, paid-only or down. */
+    private void checkModels() {
+        CraftConfig current = settings;
+        List<String> npcModels = new ArrayList<>();
+        for (NpcRegistry.Npc npc : registry.all()) {
+            if (!npc.model().isBlank()) npcModels.add(npc.model());
+        }
+        catalog.fetch("text", models -> {
+            if (models.isEmpty()) {
+                getLogger().info("Could not check the live text model list; costs show once it loads.");
+                return;
+            }
+            warn(ModelCatalog.warnings(models, current.textModel(), "text"));
+            for (String model : npcModels) warn(ModelCatalog.warnings(models, model, "text"));
+        });
+        catalog.fetch("image", models -> {
+            if (!models.isEmpty()) warn(ModelCatalog.warnings(models, current.imageModel(), "image"));
+        });
+    }
+
+    private void warn(List<String> warnings) {
+        for (String warning : warnings) getLogger().warning(warning);
     }
 
     @Override
     public void onDisable() {
         sessions.clear();
-        if (registry != null) registry.save();
+        if (registry != null) {
+            registry.close();
+            registry.save();
+        }
     }
 
     public CraftConfig settings() {
@@ -101,6 +147,27 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
 
     public Map<UUID, Session> sessions() {
         return sessions;
+    }
+
+    /** One more NPC answer for this player now, or a "slow down" note. The console is never limited. */
+    public boolean allowChat(CommandSender sender) {
+        return allow(sender, chatLimit);
+    }
+
+    /** One more picture for this player now, or a "slow down" note. */
+    public boolean allowImageRequest(CommandSender sender) {
+        return allow(sender, imageLimit);
+    }
+
+    private static boolean allow(CommandSender sender, RateLimiter limiter) {
+        if (!(sender instanceof Player player)) return true;
+        RateLimiter.Decision decision = limiter.tryAcquire(player.getUniqueId(), System.currentTimeMillis());
+        if (!decision.allowed()) {
+            long seconds = Math.max(1, (decision.retryAfterMillis() + 999) / 1000);
+            player.sendMessage(Component.text(
+                    "Slow down: try again in " + seconds + "s.", NamedTextColor.RED));
+        }
+        return decision.allowed();
     }
 
     /** One more picture today, when the owner's budget allows it. */
@@ -131,26 +198,69 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         return java.time.LocalDate.now().toString();
     }
 
-    /** Spawns every saved NPC at its place; missing worlds are skipped. */
-    private void spawnAll() {
+    /**
+     * The world saves each NPC's villager, so a restart reuses it. Villagers
+     * load with their chunk, often after the plugin starts, so each chunk that
+     * holds an NPC is checked once its entities are in: the chunks already
+     * loaded now, the others in {@link #onEntitiesLoad}.
+     */
+    private void settleLoadedNpcs() {
         for (NpcRegistry.Npc npc : registry.all()) {
-            if (findNpc(npc.id()) != null) continue;
-            World world = Bukkit.getWorld(npc.place().world());
-            if (world == null) continue;
-            spawnVillager(npc, npc.place().toLocation());
+            Location at = npc.place().toLocation();
+            if (at != null && at.getWorld().isChunkLoaded(at.getBlockX() >> 4, at.getBlockZ() >> 4)) {
+                settle(at.getChunk());
+            }
         }
+    }
+
+    @EventHandler
+    public void onEntitiesLoad(EntitiesLoadEvent event) {
+        Chunk chunk = event.getChunk();
+        boolean ours = event.getEntities().stream().anyMatch(entity -> npcId(entity) != null)
+                || registry.all().stream().anyMatch(npc -> npc.place().in(chunk));
+        if (ours) Bukkit.getScheduler().runTask(this, () -> settle(chunk));
+    }
+
+    /**
+     * One villager per NPC in this chunk: extra copies (older versions spawned
+     * one per restart) and villagers of removed NPCs go, and an NPC that stands
+     * here without a villager anywhere gets a new one.
+     */
+    private void settle(Chunk chunk) {
+        if (!chunk.isLoaded() || !chunk.isEntitiesLoaded()) return;
+        Set<String> here = new HashSet<>();
+        for (Entity entity : chunk.getEntities()) {
+            String id = npcId(entity);
+            if (id == null) continue;
+            if (registry.byId(id) == null || !here.add(id)) entity.remove();
+        }
+        for (NpcRegistry.Npc npc : registry.all()) {
+            if (here.contains(npc.id()) || !npc.place().in(chunk)) continue;
+            if (findNpc(npc.id()) == null) spawnVillager(npc, npc.place().toLocation());
+        }
+    }
+
+    private static String npcId(Entity entity) {
+        return entity instanceof Villager
+                ? entity.getPersistentDataContainer().get(NPC_KEY, PersistentDataType.STRING)
+                : null;
     }
 
     /** The live villager of one NPC, or null when it is not loaded. */
     public Villager findNpc(String npcId) {
+        List<Villager> found = findNpcs(npcId);
+        return found.isEmpty() ? null : found.get(0);
+    }
+
+    /** Every loaded villager of one NPC. */
+    public List<Villager> findNpcs(String npcId) {
+        List<Villager> found = new ArrayList<>();
         for (World world : Bukkit.getWorlds()) {
-            for (Entity entity : world.getEntitiesByClass(Villager.class)) {
-                String id = entity.getPersistentDataContainer().get(
-                        NPC_KEY, PersistentDataType.STRING);
-                if (npcId.equals(id)) return (Villager) entity;
+            for (Villager villager : world.getEntitiesByClass(Villager.class)) {
+                if (npcId.equals(npcId(villager))) found.add(villager);
             }
         }
-        return null;
+        return found;
     }
 
     public Villager spawnVillager(NpcRegistry.Npc npc, org.bukkit.Location location) {
@@ -179,20 +289,25 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         sessions.remove(event.getPlayer().getUniqueId());
     }
 
-    /** Right-clicking an NPC starts the conversation. */
+    /**
+     * Right-clicking an NPC only opens the conversation; nothing is sent to
+     * the model until the player types. The hand and permission checks come
+     * from tomdacatto's "Pollinations for Paper" (NpcListener.java).
+     */
     @EventHandler
     public void onInteract(PlayerInteractEntityEvent event) {
-        if (!(event.getRightClicked() instanceof Villager villager)) return;
-        String npcId = villager.getPersistentDataContainer().get(
-                NPC_KEY, PersistentDataType.STRING);
+        String npcId = npcId(event.getRightClicked());
         if (npcId == null) return;
         event.setCancelled(true);
-        NpcRegistry.Npc npc = registry.all().stream()
-                .filter(one -> one.id().equals(npcId))
-                .findFirst()
-                .orElse(null);
+        if (event.getHand() != EquipmentSlot.HAND) return;
+        NpcRegistry.Npc npc = registry.byId(npcId);
         if (npc == null) return;
         Player player = event.getPlayer();
+        if (!player.hasPermission("pollinations.chat")) {
+            player.sendMessage(Component.text(
+                    "You lack the pollinations.chat permission.", NamedTextColor.RED));
+            return;
+        }
         sessions.put(player.getUniqueId(), new Session(npc.name(), System.currentTimeMillis() + 180_000, false));
         player.sendMessage(Component.text(
                 "You are now talking to " + npc.name() + " (" + npc.persona() + ")."
@@ -219,7 +334,10 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         }
         event.setCancelled(true);
         if (handler != null) {
-            handler.talkToNpc(event.getPlayer(), session.npcName(), line, session.room());
+            // Chat arrives on its own thread; the NPCs and their memory live on the game thread.
+            Player player = event.getPlayer();
+            Bukkit.getScheduler().runTask(this,
+                    () -> handler.talkToNpc(player, session.npcName(), line, session.room()));
         }
     }
 
@@ -237,35 +355,49 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         return out.toString();
     }
 
-    /** Cache of the live model list, refreshed every few minutes. */
+    /**
+     * The live model lists, fetched in the background when the plugin starts
+     * and again once an hour. The game never waits for them: until a list
+     * arrives, prices are simply not shown.
+     */
     public static final class ModelCatalogCache {
 
+        private final JavaPlugin plugin;
         private final PollinationsClient client;
         private final String apiKey;
         private final Map<String, Cached> cache = new ConcurrentHashMap<>();
+        private final Map<String, Long> tried = new ConcurrentHashMap<>();
 
         private record Cached(List<ModelInfo> models, long at) {}
 
-        public ModelCatalogCache(PollinationsClient client, String apiKey) {
+        public ModelCatalogCache(JavaPlugin plugin, PollinationsClient client, String apiKey) {
+            this.plugin = plugin;
             this.client = client;
             this.apiKey = apiKey;
         }
 
-        /** The text or image models, fetched at most once per five minutes. */
+        /** The models fetched so far, or an empty list. Never touches the network. */
         public List<ModelInfo> models(String kind) {
             Cached cached = cache.get(kind);
-            if (cached != null && System.currentTimeMillis() - cached.at() < 300_000) {
-                return cached.models();
-            }
-            try {
-                List<ModelInfo> models =
-                        ModelCatalog.parse(client.modelList(kind, apiKey));
-                cache.put(kind, new Cached(models, System.currentTimeMillis()));
-                return models;
-            } catch (Exception e) {
-                if (cached != null) return cached.models();
-                return new ArrayList<>();
-            }
+            long now = System.currentTimeMillis();
+            boolean stale = cached == null || now - cached.at() > 3_600_000;
+            if (stale && now - tried.getOrDefault(kind, 0L) > 60_000) fetch(kind, models -> {});
+            return cached == null ? List.of() : cached.models();
+        }
+
+        /** Fetches one list off the game thread, then hands it over (empty when it failed). */
+        public void fetch(String kind, Consumer<List<ModelInfo>> then) {
+            tried.put(kind, System.currentTimeMillis());
+            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                List<ModelInfo> models = List.of();
+                try {
+                    models = ModelCatalog.parse(client.modelList(kind, apiKey));
+                } catch (Exception e) {
+                    plugin.getLogger().fine("model list: " + e.getMessage());
+                }
+                if (!models.isEmpty()) cache.put(kind, new Cached(models, System.currentTimeMillis()));
+                then.accept(models);
+            });
         }
     }
 }

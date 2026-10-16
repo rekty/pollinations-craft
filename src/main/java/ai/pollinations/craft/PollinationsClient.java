@@ -26,15 +26,13 @@ public final class PollinationsClient {
 
     private final HttpClient http;
     private final String baseUrl;
-    private final String imageBaseUrl;
 
     public PollinationsClient() {
-        this("https://gen.pollinations.ai", "https://image.pollinations.ai");
+        this("https://gen.pollinations.ai");
     }
 
-    public PollinationsClient(String baseUrl, String imageBaseUrl) {
+    public PollinationsClient(String baseUrl) {
         this.baseUrl = baseUrl;
-        this.imageBaseUrl = imageBaseUrl;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(20))
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -133,20 +131,21 @@ public final class PollinationsClient {
 
     /**
      * One generated image, as PNG or JPEG bytes. The image endpoint streams
-     * the picture itself, so a failure arrives as HTML or JSON to read.
+     * the picture itself, so a failure arrives as HTML or JSON to read. The
+     * key goes in the authorization header, never in the URL.
      */
     public byte[] image(
             String model, String apiKey, String prompt, int width, int height, int seed)
             throws Exception {
-        String url = imageBaseUrl
-                + "/prompt/" + URLEncoder.encode(prompt, StandardCharsets.UTF_8)
+        String url = baseUrl
+                + "/image/" + URLEncoder.encode(prompt, StandardCharsets.UTF_8)
                 .replace("+", "%20")
                 + "?width=" + width + "&height=" + height
-                + "&nologo=true&safe=true"
+                + "&safe=true"
                 + (seed >= 0 ? "&seed=" + seed : "")
-                + (model == null || model.isBlank() ? "" : "&model=" + model)
-                + (apiKey == null || apiKey.isBlank() ? "" : "&token=" + apiKey);
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                + (model == null || model.isBlank() ? ""
+                        : "&model=" + URLEncoder.encode(model, StandardCharsets.UTF_8));
+        HttpRequest request = authorized(url, apiKey)
                 .timeout(Duration.ofMinutes(3))
                 .header("user-agent", "pollinations-craft")
                 .GET()

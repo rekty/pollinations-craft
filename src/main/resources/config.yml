@@ -21,5 +21,12 @@ image:
 # 0 means every player may generate without a limit.
 daily-image-limit: 40
 
+# Per-player limits, so one player cannot spend the owner's Pollen alone.
+# The console is never limited; 0 turns a limit off.
+limits:
+  cooldown-seconds: 5    # wait between two answers, and between two pictures
+  chats-per-hour: 60     # NPC answers and /polli ask
+  images-per-hour: 10    # /polli image, on top of daily-image-limit
+
 # Show the Pollen cost after each answer, so spending stays visible.
 announce-costs: true

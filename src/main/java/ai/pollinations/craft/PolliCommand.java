@@ -4,6 +4,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -76,6 +77,7 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
             sender.sendMessage(Component.text("Usage: /polli ask <prompt>", NamedTextColor.RED));
             return;
         }
+        if (!plugin.allowChat(sender)) return;
         sender.sendMessage(Component.text("Thinking…", NamedTextColor.GRAY));
         runAsync(() -> {
             try {
@@ -86,7 +88,7 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
                         List.of(), truncate(prompt), 160);
                 runSync(() -> {
                     sender.sendMessage(Component.text(reply.text(), NamedTextColor.WHITE));
-                    cost(sender, reply.promptTokens(), reply.completionTokens());
+                    cost(sender, plugin.settings().textModel(), reply.promptTokens(), reply.completionTokens());
                 });
             } catch (Exception e) {
                 runSync(() -> sender.sendMessage(
@@ -161,8 +163,7 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
             sender.sendMessage(Component.text("No NPC called " + args[2] + ".", NamedTextColor.RED));
             return;
         }
-        Villager villager = plugin.findNpc(npc.id());
-        if (villager != null) villager.remove();
+        for (Villager villager : plugin.findNpcs(npc.id())) villager.remove();
         plugin.registry().remove(npc.name());
         plugin.registry().save();
         sender.sendMessage(Component.text(npc.name() + " is gone.", NamedTextColor.GREEN));
@@ -213,6 +214,7 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
                     "The server owner has not set an API key yet.", NamedTextColor.RED));
             return;
         }
+        if (!plugin.allowChat(sender)) return;
         UUID playerId = sender instanceof Player player
                 ? player.getUniqueId()
                 : new UUID(0, 0);
@@ -220,12 +222,12 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
         String playerName = sender instanceof Player player ? player.getName() : "the console";
         String system = ConversationMemory.systemPrompt(npc.persona(), npc.name(), playerName);
         List<String[]> history = memory.asMessages();
+        String model = npc.model().isBlank()
+                ? plugin.settings().textModel()
+                : npc.model();
         sender.sendMessage(Component.text(npc.name() + " is thinking…", NamedTextColor.DARK_GRAY));
         runAsync(() -> {
             try {
-                String model = npc.model().isBlank()
-                        ? plugin.settings().textModel()
-                        : npc.model();
                 PollinationsClient.ChatReply reply = plugin.client().chat(
                         model,
                         plugin.settings().apiKey(),
@@ -235,18 +237,21 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
                         160);
                 runSync(() -> {
                     memory.remember(line, reply.text());
+                    plugin.registry().saveMemoriesLater();
                     if (room) {
                         for (UUID memberId : rooms.getOrDefault(npc.name(), java.util.Set.of())) {
                             Player member = Bukkit.getPlayer(memberId);
                             if (member != null) {
                                 member.sendMessage(Component.text(npc.name() + ": ", NamedTextColor.AQUA)
                                         .append(Component.text(reply.text(), NamedTextColor.WHITE)));
+                                villagerYes(member);
                             }
                         }
                     } else {
                         sender.sendMessage(Component.text(npc.name() + ": ", NamedTextColor.AQUA)
                                 .append(Component.text(reply.text(), NamedTextColor.WHITE)));
-                        cost(sender, reply.promptTokens(), reply.completionTokens());
+                        if (sender instanceof Player player) villagerYes(player);
+                        cost(sender, model, reply.promptTokens(), reply.completionTokens());
                     }
                 });
             } catch (Exception e) {
@@ -267,6 +272,7 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
             return;
         }
         Player player = sender instanceof Player p ? p : null;
+        if (!plugin.allowImageRequest(sender)) return;
         if (player != null && !plugin.allowImage(player)) {
             sender.sendMessage(Component.text(
                     "You used your " + plugin.settings().dailyImageLimit()
@@ -369,10 +375,14 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
 
     // ------------------------------------------------------------- helpers
 
-    private void cost(CommandSender sender, int promptTokens, int completionTokens) {
+    /** The villager's happy "yes" sound with each answer, an idea from scalyxapp-jpg's plugin. */
+    private static void villagerYes(Player player) {
+        player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_YES, 1f, 1f);
+    }
+
+    private void cost(CommandSender sender, String modelName, int promptTokens, int completionTokens) {
         if (!plugin.settings().announceCosts()) return;
-        ModelInfo model = ModelCatalog.find(
-                plugin.catalog().models("text"), plugin.settings().textModel());
+        ModelInfo model = ModelCatalog.find(plugin.catalog().models("text"), modelName);
         double pollen = model == null ? -1 : model.textCost(promptTokens, completionTokens);
         if (pollen >= 0) {
             sender.sendMessage(Component.text(
