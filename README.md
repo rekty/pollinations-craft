@@ -24,8 +24,8 @@ Add Pollinations AI to a Paper server with one plugin, paid with your own
   [image](https://gen.pollinations.ai/image/models) models straight from the
   gateway; any name from those pages works in the config or for an NPC.
 - **Spending stays visible.** Every answer and picture prints its cost in
-  Pollen, and a daily per-player picture budget keeps one player from
-  spending the month.
+  Pollen. A short cooldown, an hourly cap per player and a daily picture
+  budget keep one player from spending the month.
 
 Every AI call is billed to the API key in the config, so the plugin costs its
 owner Pollen and nothing else.
@@ -33,7 +33,7 @@ owner Pollen and nothing else.
 ## Install
 
 1. Run a [Paper](https://papermc.io) 1.21 server on Java 21.
-2. Download `pollinations-craft-1.0.0.jar` from the
+2. Download `pollinations-craft-1.1.0.jar` from the
    [latest release](https://github.com/rekty/pollinations-craft/releases)
    into `plugins/`.
 3. Start the server once: it creates `plugins/PollinationsCraft/config.yml`.
@@ -44,7 +44,8 @@ owner Pollen and nothing else.
    api-key: "pk_your_key_here"
    ```
 
-5. Run `/polli reload`. Done.
+5. Run `/polli reload`. Done. The console warns if a model in the config is
+   not on the live list, needs paid Pollen or is down.
 
 Without a key the plugin still loads, and every AI command tells the player
 that the owner has to set one up first.
@@ -86,6 +87,9 @@ chat. Type `bye` to stop, or wait three minutes.
 | `memory.characters` | `2000` | Character cap on what is sent back to the model. |
 | `image.width`, `image.height` | `512` | Generated picture size, fitted into the map. |
 | `daily-image-limit` | `40` | Pictures per player per day; `0` is unlimited. |
+| `limits.cooldown-seconds` | `5` | Wait per player between two answers, and between two pictures; `0` turns it off. |
+| `limits.chats-per-hour` | `60` | NPC answers and `/polli ask` per player per hour; `0` is unlimited. |
+| `limits.images-per-hour` | `10` | Pictures per player per hour, on top of the daily limit; `0` is unlimited. |
 | `announce-costs` | `true` | Print the Pollen cost after each answer. |
 
 ## Build
@@ -102,10 +106,12 @@ gateway client against a local HTTP server — no Pollinations account needed.
 
 - Text: `POST https://gen.pollinations.ai/v1/chat/completions` with the
   persona as the system prompt and the saved conversation as history.
-- Images: `GET https://image.pollinations.ai/prompt/<prompt>` with the model,
-  size and key, then fitted into the 128×128 map canvas.
+- Images: `GET https://gen.pollinations.ai/image/<prompt>` with the model and
+  size; the key goes in the `Authorization` header, never in the link. The
+  picture is fitted into the 128×128 map canvas.
 - Models: `GET https://gen.pollinations.ai/text/models` and
-  `/image/models`, cached for five minutes.
+  `/image/models`, fetched in the background at start and then at most once
+  an hour, so a slow list never pauses the server.
 
 ## Run on a real server
 

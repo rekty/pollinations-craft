@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "ai.pollinations.craft"
-version = "1.0.0"
+version = "1.1.0"
 
 java {
     toolchain.languageVersion = JavaLanguageVersion.of(21)
@@ -21,6 +21,11 @@ dependencies {
     testImplementation(platform("org.junit:junit-bom:5.11.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+// The sources hold characters such as "…"; without this a Windows build shows "â€¦" in game.
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
 }
 
 tasks.test {

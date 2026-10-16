@@ -1,19 +1,27 @@
 package ai.pollinations.craft;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Villager;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.regex.Pattern;
 
@@ -44,6 +52,13 @@ public final class NpcRegistry {
             if (world == null) return null;
             return new Location(world, x, y, z, yaw, 0f);
         }
+
+        /** True when this place lies in that chunk. */
+        public boolean in(Chunk chunk) {
+            return chunk.getWorld().getName().equals(world)
+                    && ((int) Math.floor(x) >> 4) == chunk.getX()
+                    && ((int) Math.floor(z) >> 4) == chunk.getZ();
+        }
     }
 
     /** NPC names: what a player can type, and what the server allows. */
@@ -56,18 +71,40 @@ public final class NpcRegistry {
     private final Map<String, Npc> byName = new LinkedHashMap<>();
     // npc id -> player id -> memory
     private final Map<String, Map<UUID, ConversationMemory>> memories = new LinkedHashMap<>();
+    // True when npcs.yml exists but cannot be read: no villager is removed and the file is not overwritten.
+    private boolean broken;
+    // The plugin's one writer thread, so memory.yml is saved in order and never on the game thread.
+    private final Executor writer;
+    // The newest conversations not yet on disk; older pending saves are skipped.
+    private final AtomicReference<Map<String, List<String>>> pending = new AtomicReference<>();
+    // False after a failed write, so /polli reload does not read an older file over newer data.
+    private volatile boolean npcsSaved = true;
+    private volatile boolean memorySaved = true;
+    // True when memory.yml cannot be read and could not be moved aside: it is not overwritten.
+    private boolean keepMemoryFile;
 
-    public NpcRegistry(File dataFolder, int maxTurns, int maxChars) {
+    public NpcRegistry(File dataFolder, int maxTurns, int maxChars, Executor writer) {
         this.npcsFile = new File(dataFolder, "npcs.yml");
         this.memoryFile = new File(dataFolder, "memory.yml");
         this.maxTurns = maxTurns;
         this.maxChars = maxChars;
+        this.writer = writer;
     }
 
     public void load() {
         byName.clear();
+        broken = false;
+        loadMemories();
         if (!npcsFile.exists()) return;
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(npcsFile);
+        YamlConfiguration yaml = new YamlConfiguration();
+        try {
+            yaml.load(npcsFile);
+        } catch (IOException | InvalidConfigurationException e) {
+            broken = true;
+            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot read npcs.yml;"
+                    + " NPC villagers are left alone until it is fixed and /polli reload runs", e);
+            return;
+        }
         ConfigurationSection section = yaml.getConfigurationSection("npcs");
         if (section == null) return;
         for (String id : section.getKeys(false)) {
@@ -87,10 +124,21 @@ public final class NpcRegistry {
                     place);
             byName.put(npc.name().toLowerCase(), npc);
         }
-        loadMemories();
+    }
+
+    /** True when npcs.yml could not be read, so no villager may be judged an orphan. */
+    public boolean broken() {
+        return broken;
+    }
+
+    /** False when the last write of npcs.yml or memory.yml failed. */
+    public boolean saved() {
+        return npcsSaved && memorySaved;
     }
 
     public void save() {
+        saveMemoriesLater();
+        if (broken) return; // keep the unreadable npcs.yml for the owner to fix
         YamlConfiguration yaml = new YamlConfiguration();
         for (Npc npc : byName.values()) {
             String base = "npcs." + npc.id() + ".";
@@ -103,18 +151,26 @@ public final class NpcRegistry {
             yaml.set(base + "z", npc.place().z());
             yaml.set(base + "yaw", npc.place().yaw());
         }
-        try {
-            yaml.save(npcsFile);
-        } catch (IOException e) {
-            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot save npcs.yml", e);
-        }
-        saveMemories();
+        npcsSaved = write(npcsFile, yaml.saveToString());
     }
 
     private void loadMemories() {
         memories.clear();
+        keepMemoryFile = false;
         if (!memoryFile.exists()) return;
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(memoryFile);
+        YamlConfiguration yaml = new YamlConfiguration();
+        try {
+            yaml.load(memoryFile);
+        } catch (IOException | InvalidConfigurationException e) {
+            // Keep the unreadable file for the owner instead of overwriting it with the next answer.
+            File aside = new File(memoryFile.getParentFile(), "memory.yml.broken-" + System.currentTimeMillis());
+            boolean moved = memoryFile.renameTo(aside);
+            keepMemoryFile = !moved;
+            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot read memory.yml; " + (moved
+                    ? "moved it to " + aside.getName() + " and started empty"
+                    : "memory is not saved until it is fixed and /polli reload runs"), e);
+            return;
+        }
         ConfigurationSection npcs = yaml.getConfigurationSection("memory");
         if (npcs == null) return;
         for (String npcId : npcs.getKeys(false)) {
@@ -137,8 +193,14 @@ public final class NpcRegistry {
         }
     }
 
-    private void saveMemories() {
-        YamlConfiguration yaml = new YamlConfiguration();
+    /**
+     * Writes memory.yml in the background, so a crash or a reload loses at
+     * most the answer in flight. Call it on the game thread after each answer:
+     * it only copies the conversations; the writer turns them into YAML.
+     */
+    public void saveMemoriesLater() {
+        if (keepMemoryFile) return;
+        Map<String, List<String>> snapshot = new LinkedHashMap<>();
         for (Map.Entry<String, Map<UUID, ConversationMemory>> npc : memories.entrySet()) {
             for (Map.Entry<UUID, ConversationMemory> player : npc.getValue().entrySet()) {
                 List<String> lines = new ArrayList<>();
@@ -146,13 +208,38 @@ public final class NpcRegistry {
                     lines.add(pair[0]);
                     lines.add(pair[1]);
                 }
-                yaml.set("memory." + npc.getKey() + "." + player.getKey(), lines);
+                snapshot.put(npc.getKey() + "." + player.getKey(), lines);
             }
         }
+        pending.set(snapshot);
+        writer.execute(() -> {
+            Map<String, List<String>> latest = pending.getAndSet(null);
+            if (latest == null) return; // an earlier task already wrote this one
+            YamlConfiguration yaml = new YamlConfiguration();
+            latest.forEach((path, lines) -> yaml.set("memory." + path, lines));
+            memorySaved = write(memoryFile, yaml.saveToString());
+        });
+    }
+
+    /**
+     * Write to a temporary file of its own, then swap it in, so a crash never
+     * leaves half a file and two writes never share a temporary file.
+     * Returns false when the file could not be saved.
+     */
+    private static boolean write(File file, String text) {
+        Path target = file.toPath().toAbsolutePath();
+        Path temporary = null;
         try {
-            yaml.save(memoryFile);
+            Files.createDirectories(target.getParent());
+            temporary = target.resolveSibling(file.getName() + "." + System.nanoTime() + ".tmp");
+            Files.writeString(temporary, text, StandardCharsets.UTF_8);
+            Files.move(temporary, target,
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            return true;
         } catch (IOException e) {
-            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot save memory.yml", e);
+            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot save " + file.getName(), e);
+            if (temporary != null) temporary.toFile().delete();
+            return false;
         }
     }
 
@@ -175,6 +262,14 @@ public final class NpcRegistry {
 
     public Npc get(String name) {
         return name == null ? null : byName.get(name.toLowerCase());
+    }
+
+    /** The NPC a villager's tag points at, or null for a removed one. */
+    public Npc byId(String id) {
+        for (Npc npc : byName.values()) {
+            if (npc.id().equals(id)) return npc;
+        }
+        return null;
     }
 
     public Npc add(String name, String persona, String model, Place place) {

@@ -15,7 +15,10 @@ public record CraftConfig(
         int imageWidth,
         int imageHeight,
         int dailyImageLimit,
-        boolean announceCosts) {
+        boolean announceCosts,
+        int cooldownSeconds,
+        int chatsPerHour,
+        int imagesPerHour) {
 
     public static CraftConfig read(FileConfiguration config) {
         return new CraftConfig(
@@ -27,7 +30,10 @@ public record CraftConfig(
                 clamp(config.getInt("image.width", 512), 256, 1024),
                 clamp(config.getInt("image.height", 512), 256, 1024),
                 Math.max(0, config.getInt("daily-image-limit", 40)),
-                config.getBoolean("announce-costs", true));
+                config.getBoolean("announce-costs", true),
+                Math.max(0, config.getInt("limits.cooldown-seconds", 5)),
+                Math.max(0, config.getInt("limits.chats-per-hour", 60)),
+                Math.max(0, config.getInt("limits.images-per-hour", 10)));
     }
 
     private static int clamp(int value, int min, int max) {

@@ -48,6 +48,33 @@ class ModelCatalogTest {
         assertNull(ModelCatalog.resolve(models, null));
     }
 
+    private static final String IMAGE_LIST = """
+            [
+              {"name": "black-forest-labs/flux.1-schnell", "aliases": ["flux"],
+               "paid_only": false, "health": {"status": "healthy"},
+               "pricing": {"completionImageTokens": "0.002"}},
+              {"name": "black-forest-labs/flux.2-max", "aliases": [],
+               "paid_only": true, "health": {"status": "down"}}
+            ]""";
+
+    @Test
+    void resolvesAliasesFromTheLiveList() {
+        List<ModelInfo> models = ModelCatalog.parse(IMAGE_LIST);
+        assertEquals("black-forest-labs/flux.1-schnell", ModelCatalog.resolve(models, "flux"));
+        assertEquals(0.002, ModelCatalog.imageCost(ModelCatalog.find(models, "FLUX")), 1e-12);
+    }
+
+    @Test
+    void warnsAboutMissingPaidOnlyAndDownModels() {
+        List<ModelInfo> models = ModelCatalog.parse(IMAGE_LIST);
+        assertTrue(ModelCatalog.warnings(models, "flux", "image").isEmpty());
+        List<String> paid = ModelCatalog.warnings(models, "flux.2-max", "image");
+        assertEquals(2, paid.size());
+        assertTrue(paid.get(0).contains("paid Pollen"));
+        assertTrue(paid.get(1).contains("down"));
+        assertTrue(ModelCatalog.warnings(models, "dall-e", "image").get(0).contains("not in the live list"));
+    }
+
     @Test
     void survivesABrokenList() {
         assertTrue(ModelCatalog.parse("not json at all").isEmpty());

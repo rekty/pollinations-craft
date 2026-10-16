@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import javax.imageio.ImageIO;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -58,8 +59,9 @@ class PollinationsClientTest {
                     "[{\"name\":\"openai/gpt-5.4-nano\",\"title\":\"Nano\"}]"
                             .getBytes(StandardCharsets.UTF_8));
         });
-        server.createContext("/prompt/", exchange -> {
+        server.createContext("/image/", exchange -> {
             lastPath.set(exchange.getRequestURI().toString());
+            lastAuth.set(exchange.getRequestHeaders().getFirst("authorization"));
             BufferedImage image = new BufferedImage(32, 32, BufferedImage.TYPE_INT_RGB);
             Graphics2D g = image.createGraphics();
             g.setColor(Color.MAGENTA);
@@ -90,7 +92,7 @@ class PollinationsClientTest {
 
     @Test
     void sendsTheModelHistoryAndKeyAndReadsTheReply() throws Exception {
-        PollinationsClient client = new PollinationsClient(base, base);
+        PollinationsClient client = new PollinationsClient(base);
         PollinationsClient.ChatReply reply = client.chat(
                 "openai/gpt-5.4-nano",
                 "pk_test",
@@ -113,7 +115,7 @@ class PollinationsClientTest {
 
     @Test
     void readsTheModelList() throws Exception {
-        PollinationsClient client = new PollinationsClient(base, base);
+        PollinationsClient client = new PollinationsClient(base);
         List<ModelInfo> models = ModelCatalog.parse(client.modelList("text", "pk_test"));
         assertEquals(1, models.size());
         assertEquals("openai/gpt-5.4-nano", models.get(0).name());
@@ -122,7 +124,7 @@ class PollinationsClientTest {
 
     @Test
     void aGatewayErrorBecomesAPlayerReadableMessage() {
-        PollinationsClient client = new PollinationsClient(base, base);
+        PollinationsClient client = new PollinationsClient(base);
         Exception error = assertThrows(Exception.class, () -> client.chat(
                 "openai/gpt-5.4-nano", "pk_test", null, List.of(), "boom", 160));
         assertTrue(error.getMessage() != null && error.getMessage().contains("insufficient balance"),
@@ -132,12 +134,13 @@ class PollinationsClientTest {
     }
 
     @Test
-    void anImageArrivesAsBytesAndCarriesTheKey() throws Exception {
-        PollinationsClient client = new PollinationsClient(base, base);
+    void anImageArrivesAsBytesWithTheKeyInTheHeaderOnly() throws Exception {
+        PollinationsClient client = new PollinationsClient(base);
         byte[] png = client.image("flux", "pk_test", "a red cube", 512, 512, -1);
         assertTrue(png.length > 100);
-        assertTrue(lastPath.get().contains("a%20red%20cube"));
-        assertTrue(lastPath.get().contains("token=pk_test"));
+        assertTrue(lastPath.get().startsWith("/image/a%20red%20cube?"));
         assertTrue(lastPath.get().contains("width=512"));
+        assertEquals("Bearer pk_test", lastAuth.get());
+        assertFalse(lastPath.get().contains("pk_test"), "the key never goes in the URL: " + lastPath.get());
     }
 }
