@@ -5,6 +5,7 @@ import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Villager;
 
@@ -71,6 +72,8 @@ public final class NpcRegistry {
     private final Map<String, Npc> byName = new LinkedHashMap<>();
     // npc id -> player id -> memory
     private final Map<String, Map<UUID, ConversationMemory>> memories = new LinkedHashMap<>();
+    // True when npcs.yml exists but cannot be read; the NPC villagers are then left alone.
+    private boolean broken;
     // One writer thread: memory.yml is saved in order, and never on the game thread.
     private final ExecutorService writer = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "PollinationsCraft memory writer");
@@ -87,8 +90,18 @@ public final class NpcRegistry {
 
     public void load() {
         byName.clear();
+        broken = false;
+        loadMemories();
         if (!npcsFile.exists()) return;
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(npcsFile);
+        YamlConfiguration yaml = new YamlConfiguration();
+        try {
+            yaml.load(npcsFile);
+        } catch (IOException | InvalidConfigurationException e) {
+            broken = true;
+            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot read npcs.yml;"
+                    + " NPC villagers are left alone until it is fixed and /polli reload runs", e);
+            return;
+        }
         ConfigurationSection section = yaml.getConfigurationSection("npcs");
         if (section == null) return;
         for (String id : section.getKeys(false)) {
@@ -108,7 +121,11 @@ public final class NpcRegistry {
                     place);
             byName.put(npc.name().toLowerCase(), npc);
         }
-        loadMemories();
+    }
+
+    /** True when npcs.yml could not be read, so no villager may be judged an orphan. */
+    public boolean broken() {
+        return broken;
     }
 
     public void save() {
@@ -124,12 +141,8 @@ public final class NpcRegistry {
             yaml.set(base + "z", npc.place().z());
             yaml.set(base + "yaw", npc.place().yaw());
         }
-        try {
-            yaml.save(npcsFile);
-        } catch (IOException e) {
-            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot save npcs.yml", e);
-        }
-        saveMemories();
+        write(npcsFile, yaml.saveToString());
+        saveMemoriesLater();
     }
 
     private void loadMemories() {
@@ -171,14 +184,12 @@ public final class NpcRegistry {
     public void close() {
         writer.shutdown();
         try {
-            writer.awaitTermination(10, TimeUnit.SECONDS);
+            if (!writer.awaitTermination(10, TimeUnit.SECONDS)) {
+                Bukkit.getLogger().warning("pollinations-craft: memory.yml is still being written");
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-    }
-
-    private void saveMemories() {
-        write(memoryFile, memoriesYaml().saveToString());
     }
 
     private YamlConfiguration memoriesYaml() {
@@ -196,16 +207,22 @@ public final class NpcRegistry {
         return yaml;
     }
 
-    /** Write to a temporary file, then swap it in, so a crash never leaves half a file. */
+    /**
+     * Write to a temporary file of its own, then swap it in, so a crash never
+     * leaves half a file and two writes never share a temporary file.
+     */
     private static void write(File file, String text) {
+        Path target = file.toPath().toAbsolutePath();
+        Path temporary = null;
         try {
-            Path temporary = file.toPath().resolveSibling(file.getName() + ".tmp");
-            Files.createDirectories(temporary.getParent());
+            Files.createDirectories(target.getParent());
+            temporary = target.resolveSibling(file.getName() + "." + System.nanoTime() + ".tmp");
             Files.writeString(temporary, text, StandardCharsets.UTF_8);
-            Files.move(temporary, file.toPath(),
+            Files.move(temporary, target,
                     StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
             Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot save " + file.getName(), e);
+            if (temporary != null) temporary.toFile().delete();
         }
     }
 

@@ -23,10 +23,8 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
@@ -120,8 +118,8 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
     public void onDisable() {
         sessions.clear();
         if (registry != null) {
-            registry.close();
             registry.save();
+            registry.close();
         }
     }
 
@@ -222,21 +220,24 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * One villager per NPC in this chunk: extra copies (older versions spawned
-     * one per restart) and villagers of removed NPCs go, and an NPC that stands
-     * here without a villager anywhere gets a new one.
+     * One villager per NPC: a villager in this chunk goes when its NPC was
+     * removed or another copy of it is already loaded (older versions spawned
+     * one per restart), and an NPC whose place is here gets a villager when
+     * none is loaded. Nothing is touched while npcs.yml cannot be read.
      */
     private void settle(Chunk chunk) {
-        if (!chunk.isLoaded() || !chunk.isEntitiesLoaded()) return;
-        Set<String> here = new HashSet<>();
+        if (registry.broken() || !chunk.isLoaded() || !chunk.isEntitiesLoaded()) return;
         for (Entity entity : chunk.getEntities()) {
             String id = npcId(entity);
             if (id == null) continue;
-            if (registry.byId(id) == null || !here.add(id)) entity.remove();
+            boolean another = findNpcs(id).stream()
+                    .anyMatch(other -> !other.getUniqueId().equals(entity.getUniqueId()));
+            if (registry.byId(id) == null || another) entity.remove();
         }
         for (NpcRegistry.Npc npc : registry.all()) {
-            if (here.contains(npc.id()) || !npc.place().in(chunk)) continue;
-            if (findNpc(npc.id()) == null) spawnVillager(npc, npc.place().toLocation());
+            if (npc.place().in(chunk) && findNpc(npc.id()) == null) {
+                spawnVillager(npc, npc.place().toLocation());
+            }
         }
     }
 
@@ -257,7 +258,7 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         List<Villager> found = new ArrayList<>();
         for (World world : Bukkit.getWorlds()) {
             for (Villager villager : world.getEntitiesByClass(Villager.class)) {
-                if (npcId.equals(npcId(villager))) found.add(villager);
+                if (villager.isValid() && npcId.equals(npcId(villager))) found.add(villager);
             }
         }
         return found;
@@ -379,15 +380,24 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         /** The models fetched so far, or an empty list. Never touches the network. */
         public List<ModelInfo> models(String kind) {
             Cached cached = cache.get(kind);
-            long now = System.currentTimeMillis();
-            boolean stale = cached == null || now - cached.at() > 3_600_000;
-            if (stale && now - tried.getOrDefault(kind, 0L) > 60_000) fetch(kind, models -> {});
+            if (cached == null || System.currentTimeMillis() - cached.at() > 3_600_000) {
+                fetch(kind, models -> {});
+            }
             return cached == null ? List.of() : cached.models();
         }
 
-        /** Fetches one list off the game thread, then hands it over (empty when it failed). */
+        /**
+         * Fetches one list off the game thread, at most once a minute, then
+         * hands it over (empty when it failed or is still loading).
+         */
         public void fetch(String kind, Consumer<List<ModelInfo>> then) {
-            tried.put(kind, System.currentTimeMillis());
+            long now = System.currentTimeMillis();
+            if (now - tried.getOrDefault(kind, 0L) < 60_000) {
+                Cached cached = cache.get(kind);
+                then.accept(cached == null ? List.of() : cached.models());
+                return;
+            }
+            tried.put(kind, now);
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                 List<ModelInfo> models = List.of();
                 try {

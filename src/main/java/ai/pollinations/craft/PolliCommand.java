@@ -236,8 +236,12 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
                         truncate(line),
                         160);
                 runSync(() -> {
-                    memory.remember(line, reply.text());
-                    plugin.registry().saveMemoriesLater();
+                    // Look the memory up again: /polli reload may have swapped the registry meanwhile.
+                    NpcRegistry registry = plugin.registry();
+                    if (registry.byId(npc.id()) != null) {
+                        registry.memory(npc.id(), playerId).remember(line, reply.text());
+                        registry.saveMemoriesLater();
+                    }
                     if (room) {
                         for (UUID memberId : rooms.getOrDefault(npc.name(), java.util.Set.of())) {
                             Player member = Bukkit.getPlayer(memberId);
@@ -355,7 +359,8 @@ public final class PolliCommand implements CommandExecutor, TabCompleter {
     private static void showModels(CommandSender sender, String kind, List<ModelInfo> models) {
         if (models.isEmpty()) {
             sender.sendMessage(Component.text(
-                    "The model list at gen.pollinations.ai is not reachable right now.",
+                    "The model list is still loading, or gen.pollinations.ai is not reachable."
+                            + " Try again in a minute.",
                     NamedTextColor.RED));
             return;
         }
