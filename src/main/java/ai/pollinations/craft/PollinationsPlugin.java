@@ -52,12 +52,8 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
     private RateLimiter chatLimit;
     private RateLimiter imageLimit;
     private final Map<UUID, Session> sessions = new ConcurrentHashMap<>();
-    // One writer for the plugin's lifetime: memory.yml is saved in order, never on the game thread.
-    private final ExecutorService writer = Executors.newSingleThreadExecutor(task -> {
-        Thread thread = new Thread(task, "PollinationsCraft memory writer");
-        thread.setDaemon(true);
-        return thread;
-    });
+    // One writer while the plugin is enabled: memory.yml is saved in order, never on the game thread.
+    private ExecutorService writer;
     private final Map<UUID, Integer> imagesToday = new ConcurrentHashMap<>();
     private String budgetDay = day();
 
@@ -66,6 +62,12 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        writer = Executors.newSingleThreadExecutor(task -> {
+            Thread thread = new Thread(task, "PollinationsCraft memory writer");
+            thread.setDaemon(true);
+            return thread;
+        });
+        registry = null; // an enable after a disable reads the files again
         saveDefaultConfig();
         reload();
         getServer().getPluginManager().registerEvents(this, this);
@@ -85,11 +87,12 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         reloadConfig();
         settings = CraftConfig.read(getConfig());
         client = new PollinationsClient();
+        if (registry != null && !registry.saved()) registry.save(); // a save failed: try it once more first
         if (registry == null || writesDone()) {
             registry = new NpcRegistry(getDataFolder(), settings.memoryTurns(), settings.memoryChars(), writer);
             registry.load();
         } else {
-            getLogger().warning("memory.yml is still being written; NPCs and memory were not re-read.");
+            getLogger().warning("memory.yml or npcs.yml is not saved yet; NPCs and memory were not re-read.");
         }
         gallery = new MapGallery(getDataFolder());
         catalog = new ModelCatalogCache(this, client, settings.apiKey());
@@ -99,11 +102,11 @@ public final class PollinationsPlugin extends JavaPlugin implements Listener {
         checkModels();
     }
 
-    /** Waits up to ten seconds for the saves already queued, so files are read after them. */
+    /** Waits up to ten seconds for the saves already queued; true when they all reached the disk. */
     private boolean writesDone() {
         try {
             writer.submit(() -> {}).get(10, TimeUnit.SECONDS);
-            return true;
+            return registry.saved();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;

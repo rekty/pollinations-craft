@@ -77,6 +77,11 @@ public final class NpcRegistry {
     private final Executor writer;
     // The newest conversations not yet on disk; older pending saves are skipped.
     private final AtomicReference<Map<String, List<String>>> pending = new AtomicReference<>();
+    // False after a failed write, so /polli reload does not read an older file over newer data.
+    private volatile boolean npcsSaved = true;
+    private volatile boolean memorySaved = true;
+    // True when memory.yml cannot be read and could not be moved aside: it is not overwritten.
+    private boolean keepMemoryFile;
 
     public NpcRegistry(File dataFolder, int maxTurns, int maxChars, Executor writer) {
         this.npcsFile = new File(dataFolder, "npcs.yml");
@@ -126,6 +131,11 @@ public final class NpcRegistry {
         return broken;
     }
 
+    /** False when the last write of npcs.yml or memory.yml failed. */
+    public boolean saved() {
+        return npcsSaved && memorySaved;
+    }
+
     public void save() {
         saveMemoriesLater();
         if (broken) return; // keep the unreadable npcs.yml for the owner to fix
@@ -141,11 +151,12 @@ public final class NpcRegistry {
             yaml.set(base + "z", npc.place().z());
             yaml.set(base + "yaw", npc.place().yaw());
         }
-        write(npcsFile, yaml.saveToString());
+        npcsSaved = write(npcsFile, yaml.saveToString());
     }
 
     private void loadMemories() {
         memories.clear();
+        keepMemoryFile = false;
         if (!memoryFile.exists()) return;
         YamlConfiguration yaml = new YamlConfiguration();
         try {
@@ -154,8 +165,10 @@ public final class NpcRegistry {
             // Keep the unreadable file for the owner instead of overwriting it with the next answer.
             File aside = new File(memoryFile.getParentFile(), "memory.yml.broken-" + System.currentTimeMillis());
             boolean moved = memoryFile.renameTo(aside);
-            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot read memory.yml"
-                    + (moved ? "; moved it to " + aside.getName() + " and started empty" : ""), e);
+            keepMemoryFile = !moved;
+            Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot read memory.yml; " + (moved
+                    ? "moved it to " + aside.getName() + " and started empty"
+                    : "memory is not saved until it is fixed and /polli reload runs"), e);
             return;
         }
         ConfigurationSection npcs = yaml.getConfigurationSection("memory");
@@ -186,6 +199,7 @@ public final class NpcRegistry {
      * it only copies the conversations; the writer turns them into YAML.
      */
     public void saveMemoriesLater() {
+        if (keepMemoryFile) return;
         Map<String, List<String>> snapshot = new LinkedHashMap<>();
         for (Map.Entry<String, Map<UUID, ConversationMemory>> npc : memories.entrySet()) {
             for (Map.Entry<UUID, ConversationMemory> player : npc.getValue().entrySet()) {
@@ -203,15 +217,16 @@ public final class NpcRegistry {
             if (latest == null) return; // an earlier task already wrote this one
             YamlConfiguration yaml = new YamlConfiguration();
             latest.forEach((path, lines) -> yaml.set("memory." + path, lines));
-            write(memoryFile, yaml.saveToString());
+            memorySaved = write(memoryFile, yaml.saveToString());
         });
     }
 
     /**
      * Write to a temporary file of its own, then swap it in, so a crash never
      * leaves half a file and two writes never share a temporary file.
+     * Returns false when the file could not be saved.
      */
-    private static void write(File file, String text) {
+    private static boolean write(File file, String text) {
         Path target = file.toPath().toAbsolutePath();
         Path temporary = null;
         try {
@@ -220,9 +235,11 @@ public final class NpcRegistry {
             Files.writeString(temporary, text, StandardCharsets.UTF_8);
             Files.move(temporary, target,
                     StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            return true;
         } catch (IOException e) {
             Bukkit.getLogger().log(Level.WARNING, "pollinations-craft: cannot save " + file.getName(), e);
             if (temporary != null) temporary.toFile().delete();
+            return false;
         }
     }
 
